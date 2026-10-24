@@ -1,0 +1,241 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Custom Multiview 12</title>
+<script src="https://cdn.jsdelivr.net/npm/obs-websocket-js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#101218;color:#eee;font:14px Arial,sans-serif}
+header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px;background:#1c2029;flex-wrap:wrap}
+h2{margin:0;font-size:18px}
+button,input{padding:9px;border:1px solid #414858;border-radius:5px;background:#252b37;color:white}
+button{cursor:pointer}
+button:hover{background:#3a465a}
+#status{color:#ffbd59;font-size:12px}
+main{padding:10px}
+#grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.panel{min-width:0;background:#202530;border:2px solid #343b49;border-radius:6px;overflow:hidden}
+.panel.selected{border-color:#36a2ff}
+.panel.live{border-color:#dc4747}
+.preview{width:100%;aspect-ratio:16/9;background:#090b10;display:flex;align-items:center;justify-content:center;color:#788397;overflow:hidden}
+.preview img{width:100%;height:100%;object-fit:contain}
+.info{padding:7px}
+.scene-name{font-weight:bold;overflow-wrap:anywhere;margin-bottom:7px}
+.actions{display:flex;gap:5px}
+.actions button{flex:1;font-size:12px;padding:7px 3px}
+footer{position:sticky;bottom:0;display:flex;gap:8px;padding:10px;background:#171b23}
+footer button{flex:1;font-weight:bold;padding:13px}
+#transition{background:#197b49;border-color:#31a76e}
+#connect{background:#245b91}
+#settings{display:flex;gap:6px;flex-wrap:wrap;padding:10px;background:#1b1f28}
+#settings input{min-width:0;flex:1}
+#settings button{white-space:nowrap}
+small{color:#aab3c4}
+@media(max-width:550px){#grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style>
+</head>
+<body>
+<header>
+  <h2>🎥 CUSTOM MULTIVIEW 12</h2>
+  <span id="status">Disconnected</span>
+</header>
+
+<section id="settings">
+  <input id="address" value="ws://127.0.0.1:4455" aria-label="WebSocket address">
+  <input id="password" type="password" placeholder="OBS WebSocket password">
+  <button id="connect">Connect OBS</button>
+  <button id="refresh">Refresh Scenes</button>
+</section>
+
+<main>
+  <div id="grid"></div>
+  <p><small>Click SELECT to send a scene to Studio Mode Preview. The red outline marks the current Program scene when available.</small></p>
+</main>
+
+<footer>
+  <button id="transition">⇄ TRANSITION</button>
+</footer>
+
+<script>
+(() => {
+  const status = document.getElementById("status");
+  const grid = document.getElementById("grid");
+  let obs = null;
+  let scenes = [];
+  let selected = "";
+  let program = "";
+  let busy = false;
+
+  function setStatus(message, color = "#ffbd59") {
+    status.textContent = message;
+    status.style.color = color;
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",
+      '"':"&quot;","'":"&#39;"
+    }[c]));
+  }
+
+  function render() {
+    grid.innerHTML = "";
+    scenes.slice(0,12).forEach(scene => {
+      const name = scene.sceneName;
+      const panel = document.createElement("section");
+      panel.className = "panel" +
+        (name === selected ? " selected" : "") +
+        (name === program ? " live" : "");
+
+      panel.innerHTML = `
+        <div class="preview" id="img-${scenes.indexOf(scene)}">
+          <span>Connecting preview…</span>
+        </div>
+        <div class="info">
+          <div class="scene-name">${esc(name)}</div>
+          <div class="actions">
+            <button data-select="${esc(name)}">SELECT</button>
+          </div>
+        </div>`;
+      grid.appendChild(panel);
+    });
+
+    if (!scenes.length) {
+      grid.innerHTML = '<p>No scenes loaded. Connect to OBS first.</p>';
+    }
+  }
+
+  async function loadScenes() {
+    if (!obs) return;
+    const result = await obs.call("GetSceneList");
+    scenes = result.scenes || [];
+    const current = await obs.call("GetCurrentProgramScene");
+    program = current.currentProgramSceneName || "";
+    render();
+    setStatus(`${scenes.length} scenes loaded`, "#72dc9b");
+    updatePreviews();
+  }
+
+  async function selectScene(name) {
+    if (!obs) {
+      setStatus("Connect to OBS first");
+      return;
+    }
+    if (busy) return;
+    busy = true;
+    try {
+      const mode = await obs.call("GetStudioModeEnabled");
+      if (mode.studioModeEnabled) {
+        await obs.call("SetCurrentPreviewScene", {
+          sceneName: name
+        });
+        selected = name;
+      } else {
+        setStatus("Enable Studio Mode in OBS first");
+      }
+      render();
+    } catch (e) {
+      setStatus("Select failed: " + e.message);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function doTransition() {
+    if (!obs) {
+      setStatus("Connect to OBS first");
+      return;
+    }
+    try {
+      const mode = await obs.call("GetStudioModeEnabled");
+      if (!mode.studioModeEnabled) {
+        setStatus("Enable Studio Mode in OBS first");
+        return;
+      }
+      await obs.call("TriggerStudioModeTransition");
+      const current = await obs.call("GetCurrentProgramScene");
+      program = current.currentProgramSceneName || "";
+      render();
+      setStatus("Transition sent", "#72dc9b");
+    } catch (e) {
+      setStatus("Transition failed: " + e.message);
+    }
+  }
+
+  async function updatePreviews() {
+    if (!obs) return;
+    for (let i = 0; i < Math.min(scenes.length, 12); i++) {
+      const scene = scenes[i];
+      const box = document.getElementById(`img-${i}`);
+      if (!box) continue;
+      try {
+        const shot = await obs.call("GetSourceScreenshot", {
+          sourceName: scene.sceneName,
+          imageFormat: "jpg",
+          imageWidth: 480,
+          imageHeight: 270,
+          imageCompressionQuality: 60
+        });
+        const img = document.createElement("img");
+        img.alt = scene.sceneName;
+        img.src = shot.imageData;
+        box.replaceChildren(img);
+      } catch (e) {
+        box.innerHTML = "<span>Preview unavailable</span>";
+      }
+    }
+  }
+
+  document.getElementById("connect").addEventListener("click", async () => {
+    try {
+      if (obs) {
+        try { await obs.disconnect(); } catch (_) {}
+      }
+      if (typeof window.OBSWebSocket !== "function") {
+        setStatus("WebSocket library did not load");
+        return;
+      }
+      obs = new window.OBSWebSocket();
+      await obs.connect(
+        document.getElementById("address").value.trim(),
+        document.getElementById("password").value
+      );
+      setStatus("Connected to OBS", "#72dc9b");
+      await loadScenes();
+    } catch (e) {
+      obs = null;
+      setStatus("Connection failed: " + e.message);
+    }
+  });
+
+  document.getElementById("refresh").addEventListener("click", async () => {
+    try { await loadScenes(); }
+    catch (e) { setStatus("Refresh failed: " + e.message); }
+  });
+
+  grid.addEventListener("click", e => {
+    const button = e.target.closest("[data-select]");
+    if (button) selectScene(button.dataset.select);
+  });
+
+  document.getElementById("transition").addEventListener("click", doTransition);
+
+  setInterval(async () => {
+    if (!obs) return;
+    try {
+      const current = await obs.call("GetCurrentProgramScene");
+      const nextProgram = current.currentProgramSceneName || "";
+      if (nextProgram !== program) {
+        program = nextProgram;
+        render();
+      }
+      await updatePreviews();
+    } catch (_) {}
+  }, 2000);
+})();
+</script>
+</body>
+</html>
